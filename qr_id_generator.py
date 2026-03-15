@@ -265,14 +265,16 @@ def process_csv(
     csv_path: Path,
     qr_dir: Path,
     card_dir: Path,
+    valid_until: str = VALID_UNTIL,
 ) -> tuple[int, int]:
     """
     Read *csv_path* row by row and generate an ID card for each valid member.
 
     Args:
-        csv_path: Path to the input CSV file.
-        qr_dir:   Destination directory for QR code images.
-        card_dir: Destination directory for finished ID cards.
+        csv_path:    Path to the input CSV file.
+        qr_dir:      Destination directory for QR code images.
+        card_dir:    Destination directory for finished ID cards.
+        valid_until: Expiry date string printed on every card (YYYY-MM-DD).
 
     Returns:
         Tuple of (success_count, skip_count).
@@ -303,6 +305,7 @@ def process_csv(
                     status=status,
                     qr_dir=qr_dir,
                     card_dir=card_dir,
+                    valid_until=valid_until,
                 )
                 success += 1
             except Exception:  # pragma: no cover – surface unexpected errors
@@ -319,11 +322,42 @@ def process_csv(
 # Entry point
 # ---------------------------------------------------------------------------
 
+def _prompt_valid_until() -> str:
+    """
+    Interactively ask the user for the card expiry date.
+
+    Keeps prompting until a value in YYYY-MM-DD format is entered.
+    Pressing Enter without typing accepts the default (VALID_UNTIL constant).
+
+    Returns:
+        Validated date string in YYYY-MM-DD format.
+    """
+    while True:
+        raw = input(f"\nEnter Valid Until date [{VALID_UNTIL}]: ").strip()
+
+        # Empty input → accept the default
+        if not raw:
+            print(f"Using default: {VALID_UNTIL}")
+            return VALID_UNTIL
+
+        # Validate format by attempting to parse it
+        try:
+            date.fromisoformat(raw)   # requires YYYY-MM-DD
+            return raw
+        except ValueError:
+            print("  ✗ Invalid format. Please use YYYY-MM-DD (e.g. 2026-12-31).")
+
+
 def main() -> None:
     """
-    Validate configuration, create output directories, then process the CSV.
+    Prompt for the expiry date, validate configuration, create output
+    directories, then process the CSV.
     Exits with a non-zero status code on fatal errors.
     """
+    # -- Prompt for Valid Until date -----------------------------------------
+    valid_until = _prompt_valid_until()
+    logger.info("Valid Until date set to: %s", valid_until)
+
     # -- Validate input file -------------------------------------------------
     if not CSV_PATH.exists():
         logger.error("CSV file not found: %s", CSV_PATH)
@@ -337,7 +371,7 @@ def main() -> None:
 
     # -- Process -------------------------------------------------------------
     logger.info("Starting ID card generation from: %s", CSV_PATH)
-    success, skipped = process_csv(CSV_PATH, QR_CODE_DIR, ID_CARD_DIR)
+    success, skipped = process_csv(CSV_PATH, QR_CODE_DIR, ID_CARD_DIR, valid_until)
 
     # -- Summary -------------------------------------------------------------
     logger.info(
