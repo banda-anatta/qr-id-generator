@@ -1,0 +1,21 @@
+# Sensitive files - never push to GitHub
+git_token.txt
+git_push_command.txt
+
+# Generated output - can be recreated by running the script
+qr_codes/
+id_cards/
+ID_GENERATOR-2026.zip
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environment
+.venv/
+venv/
+
+# OS artefacts
+.DS_Store
+Thumbs.db
