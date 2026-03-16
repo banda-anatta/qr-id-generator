@@ -1,18 +1,25 @@
 """
 qr_id_generator.py
 ==================
-Generates QR-code-enhanced ID cards from a CSV data source.
+Generates QR-code-enhanced ID cards for Kannada Koota Luxembourg (KKL).
 
-Each row in the CSV must contain at least three columns:
+Card design matches the KKL sample:
+    - Yellow-to-red vertical gradient background
+    - Member details in bold black text at the top
+    - Large QR code centred below the text
+    - KKL logo embedded in the centre of the QR code
+    - High error-correction (H) so the logo does not break scanning
+
+CSV columns required:
     Name        – Full display name of the member
-    ID_Number   – Unique identifier (used for filenames too)
-    Status      – Membership / access status
+    ID_Number   – Unique membership identifier (e.g. KKL2025130322)
+    Status      – Membership category (e.g. Family, Individual)
 
-Output artefacts written to disk:
-    <QR_CODE_DIR>/<ID_Number>_qr.png   – standalone QR code image
-    <ID_CARD_DIR>/<ID_Number>_id.png   – finished ID card with embedded QR code
+Output written to:
+    <QR_CODE_DIR>/<ID_Number>_qr.png   – standalone QR code with logo
+    <ID_CARD_DIR>/<ID_Number>_id.png   – finished ID card
 
-Dependencies (install via requirements.txt):
+Dependencies:
     pip install qrcode[pil] Pillow
 """
 
@@ -27,7 +34,7 @@ import qrcode
 from PIL import Image, ImageDraw, ImageFont
 
 # ---------------------------------------------------------------------------
-# Logging – write INFO+ to stdout and WARNING+ to stderr
+# Logging
 # ---------------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
@@ -37,73 +44,111 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Configuration
-# All path values fall back to sensible relative defaults so the script works
-# out of the box after cloning, while still honouring environment overrides.
+# Configuration – all paths can be overridden via environment variables
 # ---------------------------------------------------------------------------
-
-# Base directory of the script itself – used to build default relative paths
 _SCRIPT_DIR = Path(__file__).resolve().parent
 
-# Input CSV – columns required: Name, ID_Number, Status
+# Input CSV
 CSV_PATH: Path = Path(os.getenv("QR_CSV_PATH", _SCRIPT_DIR / "members.csv"))
 
 # Output directories
 QR_CODE_DIR: Path = Path(os.getenv("QR_CODE_DIR", _SCRIPT_DIR / "qr_codes"))
 ID_CARD_DIR: Path = Path(os.getenv("ID_CARD_DIR", _SCRIPT_DIR / "id_cards"))
 
-# Card dimensions (pixels)
-CARD_WIDTH: int = 600
-CARD_HEIGHT: int = 350
+# KKL logo – placed in the centre of every QR code
+# Place logo.png in the same folder as this script, or set the env variable
+LOGO_PATH: Path = Path(os.getenv("QR_LOGO_PATH", _SCRIPT_DIR / "logo.png"))
 
-# Validity date printed on every card (ISO format: YYYY-MM-DD)
+# Card dimensions (pixels) – portrait orientation to match sample
+CARD_WIDTH:  int = 550
+CARD_HEIGHT: int = 750
+
+# Default validity date (YYYY-MM-DD) – overridden by interactive prompt
 VALID_UNTIL: str = os.getenv("QR_VALID_UNTIL", "2025-12-31")
 
-# Font – falls back to PIL's built-in bitmap font when the TTF is missing
-FONT_PATH: str = os.getenv("QR_FONT_PATH", "arial.ttf")
+# Font – DejaVu Bold works well in Codespaces; Arial on Windows
+FONT_PATH: str = os.getenv(
+    "QR_FONT_PATH",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+)
 
-# QR code image size pasted onto the ID card (pixels, square)
-QR_EMBED_SIZE: int = 150
+# QR code rendered size before pasting onto the card (pixels, square)
+QR_RENDER_SIZE: int = 460
 
-# Colour palette
-COLOUR_BACKGROUND: str = "white"
-COLOUR_PRIMARY_TEXT: str = "black"
-COLOUR_STATUS_TEXT: str = "blue"
-COLOUR_BORDER: str = "#CCCCCC"
+# Logo overlaid on the QR code – as a fraction of the QR size
+# Keep <= 0.30 so scanners can still decode despite the obstruction
+LOGO_FRACTION: float = 0.28
+
+# Gradient colours (top -> bottom)
+GRADIENT_TOP:    tuple = (255, 213,   0)   # bright yellow
+GRADIENT_BOTTOM: tuple = (180,  20,   0)   # deep red
+
+# Text colour
+COLOUR_TEXT: str = "black"
+
+# Padding around text block (pixels)
+TEXT_PADDING: int = 20
 
 # Required CSV column names
-CSV_COL_NAME: str = "Name"
-CSV_COL_ID: str = "ID_Number"
+CSV_COL_NAME:   str = "Name"
+CSV_COL_ID:     str = "ID_Number"
 CSV_COL_STATUS: str = "Status"
+
+# ---------------------------------------------------------------------------
+# Gradient background helper
+# ---------------------------------------------------------------------------
+
+def _make_gradient(width: int, height: int,
+                   top: tuple, bottom: tuple) -> Image.Image:
+    """
+    Create a vertical linear gradient image from *top* colour to *bottom* colour.
+
+    Args:
+        width:  Image width in pixels.
+        height: Image height in pixels.
+        top:    RGB tuple for the top of the gradient.
+        bottom: RGB tuple for the bottom of the gradient.
+
+    Returns:
+        A new RGB PIL Image filled with the gradient.
+    """
+    base = Image.new("RGB", (width, height))
+    draw = ImageDraw.Draw(base)
+
+    for y in range(height):
+        ratio = y / (height - 1)
+        r = int(top[0] + (bottom[0] - top[0]) * ratio)
+        g = int(top[1] + (bottom[1] - top[1]) * ratio)
+        b = int(top[2] + (bottom[2] - top[2]) * ratio)
+        draw.line([(0, y), (width, y)], fill=(r, g, b))
+
+    return base
+
 
 # ---------------------------------------------------------------------------
 # Font helper
 # ---------------------------------------------------------------------------
 
-def _load_fonts(path: str) -> tuple[ImageFont.FreeTypeFont, ...]:
+def _load_fonts(path: str) -> tuple:
     """
-    Load three TrueType fonts at sizes 30 / 24 / 20 pt.
+    Load bold fonts at three sizes: 28 / 24 / 20 pt.
 
-    Falls back gracefully to PIL's built-in default bitmap font when the
-    requested TTF file cannot be found.  The built-in font is the same object
-    for all three 'sizes'; callers must accept this.
+    Falls back to PIL built-in bitmap font when the TTF cannot be found.
 
     Args:
-        path: Filesystem path (or filename on PATH) of a .ttf file.
+        path: Filesystem path to a .ttf font file.
 
     Returns:
         Tuple of (font_large, font_medium, font_small).
     """
     try:
-        font_large  = ImageFont.truetype(path, 30)
+        font_large  = ImageFont.truetype(path, 28)
         font_medium = ImageFont.truetype(path, 24)
         font_small  = ImageFont.truetype(path, 20)
-        logger.debug("Loaded TrueType font: %s", path)
+        logger.debug("Loaded font: %s", path)
     except (OSError, IOError):
         logger.warning(
-            "TrueType font not found at '%s'. "
-            "Falling back to PIL default font – text layout may differ.",
-            path,
+            "Font not found at '%s'. Falling back to PIL default font.", path
         )
         default = ImageFont.load_default()
         font_large = font_medium = font_small = default
@@ -112,40 +157,67 @@ def _load_fonts(path: str) -> tuple[ImageFont.FreeTypeFont, ...]:
 
 
 # ---------------------------------------------------------------------------
-# QR code generation
+# QR code with logo overlay
 # ---------------------------------------------------------------------------
 
 def generate_qr_code(data: str, id_number: str, output_dir: Path) -> Path:
     """
-    Encode *data* as a QR code and save it to *output_dir*.
+    Generate a QR code PNG with the KKL logo overlaid in its centre.
 
-    The QR code starts at version 1 and grows automatically (fit=True) to
-    accommodate the payload, so callers do not need to worry about data length.
+    Error correction is set to H (~30% recovery) so the logo can cover
+    up to ~28% of the QR surface without breaking scannability.
 
     Args:
-        data:       String payload to encode (e.g. multi-line vCard snippet).
-        id_number:  Member identifier used as part of the output filename.
-        output_dir: Directory in which to save the PNG file.
+        data:       Payload string to encode.
+        id_number:  Used as part of the output filename.
+        output_dir: Directory where the PNG is saved.
 
     Returns:
         Path to the saved QR code PNG.
-
-    Raises:
-        OSError: If the file cannot be written.
     """
+    # -- Build QR code --------------------------------------------------------
     qr = qrcode.QRCode(
-        version=1,         # start small; auto-grows via fit=True below
-        box_size=10,       # pixels per QR module (dot)
-        border=4,          # quiet-zone modules around the code (spec min = 4)
-        error_correction=qrcode.constants.ERROR_CORRECT_M,  # ~15 % recovery
+        version=1,
+        box_size=10,
+        border=4,
+        error_correction=qrcode.constants.ERROR_CORRECT_H,  # allows logo overlay
     )
     qr.add_data(data)
-    qr.make(fit=True)  # automatically increase version if data overflows
+    qr.make(fit=True)
 
-    img = qr.make_image(fill_color="black", back_color="white")
+    qr_img = qr.make_image(fill_color="black", back_color="white").convert("RGBA")
+    qr_img = qr_img.resize((QR_RENDER_SIZE, QR_RENDER_SIZE), Image.LANCZOS)
 
-    qr_path = output_dir / f"{id_number}_qr.png"
-    img.save(qr_path)
+    # -- Overlay logo in the centre ------------------------------------------
+    if LOGO_PATH.exists():
+        logo_size = int(QR_RENDER_SIZE * LOGO_FRACTION)
+
+        with Image.open(LOGO_PATH).convert("RGBA") as logo_raw:
+            logo = logo_raw.resize((logo_size, logo_size), Image.LANCZOS)
+
+        logo_x = (QR_RENDER_SIZE - logo_size) // 2
+        logo_y = (QR_RENDER_SIZE - logo_size) // 2
+
+        # White circular background behind logo for clean appearance
+        mask_img  = Image.new("RGBA", (QR_RENDER_SIZE, QR_RENDER_SIZE), (0, 0, 0, 0))
+        mask_draw = ImageDraw.Draw(mask_img)
+        padding   = 6
+        mask_draw.ellipse(
+            [logo_x - padding, logo_y - padding,
+             logo_x + logo_size + padding, logo_y + logo_size + padding],
+            fill=(255, 255, 255, 255),
+        )
+        qr_img = Image.alpha_composite(qr_img, mask_img)
+        qr_img.paste(logo, (logo_x, logo_y), mask=logo)
+        logger.debug("Logo overlaid on QR code.")
+    else:
+        logger.warning(
+            "Logo not found at '%s'. Generating QR without logo.", LOGO_PATH
+        )
+
+    qr_final = qr_img.convert("RGB")
+    qr_path  = output_dir / f"{id_number}_qr.png"
+    qr_final.save(qr_path)
     logger.debug("QR code saved: %s", qr_path)
     return qr_path
 
@@ -163,68 +235,64 @@ def create_id_card(
     valid_until: str = VALID_UNTIL,
 ) -> Path:
     """
-    Composite an ID card image that contains member details and an embedded
-    QR code, then save it as a PNG.
-
-    Layout (approximate, in pixels):
-        y=20   Name  (large font, black)
-        y=70   ID    (large font, black)
-        y=120  Status (medium font, blue)
-        y=160  Valid Until (small font, black)
-        x=400,y=50  QR code (150×150 px)
-        bottom border line
+    Composite the KKL-style ID card:
+        1. Yellow-to-red gradient background
+        2. Bold member details text block at the top
+        3. Large QR code (with embedded logo) centred below
 
     Args:
-        name:        Full display name.
-        id_number:   Unique member identifier.
-        status:      Membership / access level string.
-        qr_dir:      Directory where the intermediate QR PNG is written.
-        card_dir:    Directory where the finished ID card PNG is written.
-        valid_until: Human-readable expiry date string on the card face.
+        name:        Full display name of the member.
+        id_number:   Unique membership ID string.
+        status:      Membership category / status.
+        qr_dir:      Directory for the intermediate QR PNG.
+        card_dir:    Directory for the finished ID card PNG.
+        valid_until: Expiry date string printed on the card.
 
     Returns:
         Path to the saved ID card PNG.
-
-    Raises:
-        OSError: If either the QR code or the card file cannot be written.
     """
-    # -- Canvas ---------------------------------------------------------------
-    card = Image.new("RGB", (CARD_WIDTH, CARD_HEIGHT), COLOUR_BACKGROUND)
+    # -- Gradient background --------------------------------------------------
+    card = _make_gradient(CARD_WIDTH, CARD_HEIGHT, GRADIENT_TOP, GRADIENT_BOTTOM)
     draw = ImageDraw.Draw(card)
 
     # -- Fonts ----------------------------------------------------------------
     font_large, font_medium, font_small = _load_fonts(FONT_PATH)
 
-    # -- Text -----------------------------------------------------------------
-    draw.text((20, 20),  f"Name:        {name}",              fill=COLOUR_PRIMARY_TEXT, font=font_large)
-    draw.text((20, 70),  f"ID:            {id_number}",       fill=COLOUR_PRIMARY_TEXT, font=font_large)
-    draw.text((20, 120), f"Status:      {status}",            fill=COLOUR_STATUS_TEXT,  font=font_medium)
-    draw.text((20, 160), f"Valid Until: {valid_until}",       fill=COLOUR_PRIMARY_TEXT, font=font_small)
+    # -- Format validity date as DD/MM/YYYY to match sample card --------------
+    try:
+        d = date.fromisoformat(valid_until)
+        validity_display = d.strftime("%d/%m/%Y")
+    except ValueError:
+        validity_display = valid_until
 
-    # -- Decorative border at the bottom of the card -------------------------
-    draw.line(
-        [(0, CARD_HEIGHT - 10), (CARD_WIDTH, CARD_HEIGHT - 10)],
-        fill=COLOUR_BORDER,
-        width=4,
-    )
+    # -- Text block -----------------------------------------------------------
+    lines = [
+        (f"Member:  {name}",           font_large),
+        (f"Membership ID: {id_number}", font_large),
+        (f"Category: {status}",         font_medium),
+        (f"Validity: {validity_display}", font_medium),
+    ]
 
-    # -- Embed QR code -------------------------------------------------------
-    # Build the QR payload – keep it concise; scanners have limited display area
+    y = TEXT_PADDING + 10
+    for text, font in lines:
+        draw.text((TEXT_PADDING, y), text, fill=COLOUR_TEXT, font=font)
+        bbox = draw.textbbox((0, 0), text, font=font)
+        y += (bbox[3] - bbox[1]) + 14   # line height + spacing
+
+    # -- QR code (centred horizontally, below text) ---------------------------
     qr_payload = (
-        f"Name:{name}\n"
+        f"Member:{name}\n"
         f"ID:{id_number}\n"
-        f"Status:{status}\n"
-        f"ValidUntil:{valid_until}"
+        f"Category:{status}\n"
+        f"Validity:{validity_display}"
     )
     qr_path = generate_qr_code(qr_payload, id_number, qr_dir)
 
-    # Open, resize, then paste – using LANCZOS for high-quality downscaling
     with Image.open(qr_path) as qr_img:
-        qr_resized = qr_img.resize((QR_EMBED_SIZE, QR_EMBED_SIZE), Image.LANCZOS)
+        qr_resized = qr_img.resize((QR_RENDER_SIZE, QR_RENDER_SIZE), Image.LANCZOS)
 
-    # Paste position: right side of card with a small margin
-    qr_x = CARD_WIDTH - QR_EMBED_SIZE - 30
-    qr_y = (CARD_HEIGHT - QR_EMBED_SIZE) // 2  # vertically centred
+    qr_x = (CARD_WIDTH  - QR_RENDER_SIZE) // 2
+    qr_y = y + 20
     card.paste(qr_resized, (qr_x, qr_y))
 
     # -- Save -----------------------------------------------------------------
@@ -240,15 +308,14 @@ def create_id_card(
 
 def _validate_row(row: dict, row_number: int) -> bool:
     """
-    Check that a CSV row contains all required columns and that no value is
-    empty.
+    Verify a CSV row has all required non-empty columns.
 
     Args:
-        row:        DictReader row (column → value mapping).
-        row_number: 1-based row index used in log messages.
+        row:        DictReader row.
+        row_number: 1-based index for log messages.
 
     Returns:
-        True if the row is valid; False otherwise.
+        True if valid; False to skip.
     """
     required = (CSV_COL_NAME, CSV_COL_ID, CSV_COL_STATUS)
     for col in required:
@@ -268,27 +335,22 @@ def process_csv(
     valid_until: str = VALID_UNTIL,
 ) -> tuple[int, int]:
     """
-    Read *csv_path* row by row and generate an ID card for each valid member.
+    Read the CSV and generate an ID card for each valid member row.
 
     Args:
         csv_path:    Path to the input CSV file.
-        qr_dir:      Destination directory for QR code images.
-        card_dir:    Destination directory for finished ID cards.
-        valid_until: Expiry date string printed on every card (YYYY-MM-DD).
+        qr_dir:      Destination for QR code PNGs.
+        card_dir:    Destination for ID card PNGs.
+        valid_until: Expiry date applied to all cards in this run.
 
     Returns:
         Tuple of (success_count, skip_count).
-
-    Raises:
-        FileNotFoundError: If *csv_path* does not exist.
-        csv.Error:         On malformed CSV content.
     """
     success = 0
     skipped = 0
 
     with csv_path.open(newline="", encoding="utf-8") as fh:
         reader = csv.DictReader(fh)
-
         for row_number, row in enumerate(reader, start=1):
             if not _validate_row(row, row_number):
                 skipped += 1
@@ -308,9 +370,9 @@ def process_csv(
                     valid_until=valid_until,
                 )
                 success += 1
-            except Exception:  # pragma: no cover – surface unexpected errors
+            except Exception:
                 logger.exception(
-                    "Row %d: unexpected error while processing member '%s' (ID=%s).",
+                    "Row %d: unexpected error for '%s' (ID=%s).",
                     row_number, name, id_number,
                 )
                 skipped += 1
@@ -319,67 +381,65 @@ def process_csv(
 
 
 # ---------------------------------------------------------------------------
-# Entry point
+# Interactive date prompt
 # ---------------------------------------------------------------------------
 
 def _prompt_valid_until() -> str:
     """
-    Interactively ask the user for the card expiry date.
+    Prompt the user to enter the card expiry date.
 
-    Keeps prompting until a value in YYYY-MM-DD format is entered.
-    Pressing Enter without typing accepts the default (VALID_UNTIL constant).
+    Loops until a valid YYYY-MM-DD string is entered.
+    Pressing Enter accepts the VALID_UNTIL default.
 
     Returns:
         Validated date string in YYYY-MM-DD format.
     """
     while True:
         raw = input(f"\nEnter Valid Until date [{VALID_UNTIL}]: ").strip()
-
-        # Empty input → accept the default
         if not raw:
             print(f"Using default: {VALID_UNTIL}")
             return VALID_UNTIL
-
-        # Validate format by attempting to parse it
         try:
-            date.fromisoformat(raw)   # requires YYYY-MM-DD
+            date.fromisoformat(raw)
             return raw
         except ValueError:
-            print("  ✗ Invalid format. Please use YYYY-MM-DD (e.g. 2026-12-31).")
+            print("  x Invalid format. Please use YYYY-MM-DD (e.g. 2026-12-31).")
 
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 
 def main() -> None:
     """
-    Prompt for the expiry date, validate configuration, create output
-    directories, then process the CSV.
-    Exits with a non-zero status code on fatal errors.
+    1. Prompt for expiry date
+    2. Validate paths and create output directories
+    3. Process CSV and generate all ID cards
     """
-    # -- Prompt for Valid Until date -----------------------------------------
     valid_until = _prompt_valid_until()
     logger.info("Valid Until date set to: %s", valid_until)
 
-    # -- Validate input file -------------------------------------------------
+    if not LOGO_PATH.exists():
+        logger.warning(
+            "Logo not found at '%s'. Place logo.png next to this script to embed it.",
+            LOGO_PATH,
+        )
+
     if not CSV_PATH.exists():
         logger.error("CSV file not found: %s", CSV_PATH)
         sys.exit(1)
 
-    # -- Ensure output directories exist ------------------------------------
     QR_CODE_DIR.mkdir(parents=True, exist_ok=True)
     ID_CARD_DIR.mkdir(parents=True, exist_ok=True)
-    logger.info("QR codes  → %s", QR_CODE_DIR)
-    logger.info("ID cards  → %s", ID_CARD_DIR)
+    logger.info("QR codes  -> %s", QR_CODE_DIR)
+    logger.info("ID cards  -> %s", ID_CARD_DIR)
 
-    # -- Process -------------------------------------------------------------
     logger.info("Starting ID card generation from: %s", CSV_PATH)
     success, skipped = process_csv(CSV_PATH, QR_CODE_DIR, ID_CARD_DIR, valid_until)
 
-    # -- Summary -------------------------------------------------------------
-    logger.info(
-        "Done. %d card(s) created, %d row(s) skipped.",
-        success, skipped,
-    )
+    logger.info("Done. %d card(s) created, %d row(s) skipped.", success, skipped)
     if skipped:
-        sys.exit(2)   # partial success – useful for CI pipelines
+        sys.exit(2)
 
 
 if __name__ == "__main__":
