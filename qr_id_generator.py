@@ -9,7 +9,7 @@ Reads member data directly from the KKL membership Excel file (.xlsx).
 CARD LAYOUT
 ─────────────────────────────────────────────────────────────────────────────
   ┌─────────────────────────────────────────┐
-  │ Member:      <right-justified name>     │
+  │     <name centred across full width>    │
   │ ID Number:   <right-justified id>       │
   │ Category:    <right-justified category> │
   │ Validity:    <right-justified date>     │
@@ -513,7 +513,7 @@ def create_id_card(
         7. Save the finished card to *card_dir*.
 
     Text rows on the card:
-        Member:     <name, max 30 chars>
+        <name centred, full card width, no label>
         ID Number:  <KKL2026-NNN>
         Category:   <Family | Individual>
         Validity:   <DD/MM/YYYY>
@@ -539,10 +539,7 @@ def create_id_card(
     # ── 2. Load fonts ─────────────────────────────────────────────────────────
     font_large, font_medium, font_small = _load_fonts(FONT_PATH)
 
-    # ── 3. Truncate name to NAME_MAX_CHARS at a word boundary ─────────────────
-    display_name = truncate_name(name, NAME_MAX_CHARS)
-
-    # ── 4. Format validity date as DD/MM/YYYY ─────────────────────────────────
+    # ── 3. Format validity date as DD/MM/YYYY ────────────────────────────────
     try:
         d = date.fromisoformat(valid_until)
         validity_display = d.strftime("%d/%m/%Y")
@@ -551,22 +548,34 @@ def create_id_card(
         validity_display = valid_until
         logger.warning("Could not parse date '%s' for ID %s.", valid_until, id_number)
 
-    # ── 5. Define the four text rows ──────────────────────────────────────────
+    # ── 4. Draw member name centred across the full card width ────────────────
+    # The "Member:" legend has been removed so the full card width is available
+    # for the name. The name is drawn centred horizontally on its own line.
+    name_bbox   = draw.textbbox((0, 0), name, font=font_large)
+    name_width  = name_bbox[2] - name_bbox[0]
+    name_height = name_bbox[3] - name_bbox[1]
+    name_x      = (CARD_WIDTH - name_width) // 2   # horizontally centred
+    name_y      = TEXT_PADDING_TOP
+    draw.text((name_x, name_y), name, fill=COLOUR_TEXT, font=font_large)
+
+    # Advance y below the name line before drawing the remaining rows
+    name_bottom_y = name_y + name_height + LINE_SPACING
+
+    # ── 5. Define the three label/value rows below the name ───────────────────
     # Each tuple: (label string, value string, font object)
-    # Labels are the fixed printed legends; values are the member-specific data.
-    # Note: "Membership ID" has been renamed to "ID Number" per requirements.
+    # Labels are left-justified; values are right-justified (see _draw_text_block).
+    # "Membership ID" has been renamed to "ID Number" per requirements.
     lines = [
-        ("Member:",    display_name,      font_large),   # row 1 – member name
-        ("ID Number:", id_number,         font_large),   # row 2 – KKL2026-NNN
-        ("Category:",  category,          font_medium),  # row 3 – Family/Individual
-        ("Validity:",  validity_display,  font_medium),  # row 4 – DD/MM/YYYY
+        ("ID Number:", id_number,        font_large),   # row 2 – KKL2026-NNN
+        ("Category:",  category,         font_medium),  # row 3 – Family/Individual
+        ("Validity:",  validity_display, font_medium),  # row 4 – DD/MM/YYYY
     ]
 
-    # ── 6. Draw text block (labels left, values right) ────────────────────────
+    # ── 6. Draw label/value rows (labels left, values right) ─────────────────
     text_bottom_y = _draw_text_block(
         draw=draw,
         lines=lines,
-        start_y=TEXT_PADDING_TOP,
+        start_y=name_bottom_y,
         card_width=CARD_WIDTH,
     )
 
